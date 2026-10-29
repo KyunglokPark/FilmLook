@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>iDFilm</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="topbar">
+        <span class="app-name">iDFilm</span>
+        <button id="act-open" type="button">열기</button>
+        <button id="act-save" type="button" disabled>저장</button>
+        <button id="act-compare" type="button" disabled title="원본/보정 비교 슬라이더 켜기·끄기">비교</button>
+        <span class="spacer"></span>
+        <span id="file-info"></span>
+      </header>
+
+      <div id="main">
+        <div id="viewer">
+          <div id="placeholder">이미지를 열어주세요 (열기 버튼 또는 Ctrl+O)</div>
+          <div id="compare-wrap" class="hidden">
+            <img id="preview" alt="" />
+            <img id="preview-orig" alt="" />
+            <div id="compare-divider">
+              <div class="handle">◂▸</div>
+            </div>
+            <span class="cmp-label cmp-before">BEFORE</span>
+            <span class="cmp-label cmp-after">AFTER</span>
+          </div>
+          <div id="busy" class="hidden">처리 중…</div>
+        </div>
+
+        <aside id="panel">
+          <div class="panel-title">필름 시뮬레이션</div>
+          <div id="films"></div>
+          <div class="lut-tools">
+            <button id="act-extract" type="button" title="같은 사진의 보정 전/후 파일 두 개에서 색감을 자동 추출">전/후 사진으로 레시피 추출…</button>
+            <button id="act-export-lut" type="button" disabled title="현재 LUT를 .cube 파일로 저장">LUT 내보내기(.cube)</button>
+          </div>
+
+          <div class="panel-title">조정</div>
+          <div id="sliders"></div>
+
+          <button id="act-reset" type="button">전체 초기화</button>
+        </aside>
+      </div>
+
+      <footer id="statusbar"><span id="status"></span></footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,42 @@
+[package]
+name = "idfilm"
+version = "0.1.0"
+description = "iDFilm — 후지필름 감성 이미지 보정"
+authors = ["IDOIT Inc."]
+edition = "2021"
+
+[lib]
+name = "idfilm_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.25"
+base64 = "0.22"
+# JPEG EXIF 회전 반영 (카메라 세로 사진)
+kamadak-exif = "0.5"
+
+# 이미지 디코드/처리 크레이트는 dev 빌드에서도 최적화 — 미리보기 반응성
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
