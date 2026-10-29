@@ -111,6 +111,10 @@ body {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  /* 브라우저 기본 이미지 드래그가 패닝/디바이더 포인터 이벤트를 가로채지 않게 */
+  pointer-events: none;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 /* 원본(위 레이어)은 디바이더 왼쪽만 보이게 clip — 값은 JS가 --cmp 변수로 조정 */
@@ -123,17 +127,28 @@ body {
   display: block;
 }
 
+/* --iz = 1/zoom — 확대해도 구분선·핸들이 화면에서 같은 크기로 보이게 역보정 */
 #compare-divider {
   position: absolute;
   top: 0;
   bottom: 0;
   left: var(--cmp, 50%);
-  width: 2px;
-  margin-left: -1px;
+  width: calc(2px * var(--iz, 1));
+  margin-left: calc(-1px * var(--iz, 1));
   background: rgba(255, 255, 255, 0.85);
   cursor: ew-resize;
   display: none;
   z-index: 5;
+}
+
+/* 눈에 보이는 선은 가늘어도 잡는 영역은 넓게 */
+#compare-divider::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(-9px * var(--iz, 1));
+  right: calc(-9px * var(--iz, 1));
 }
 
 #compare-wrap.comparing #compare-divider {
@@ -144,7 +159,7 @@ body {
   position: absolute;
   top: 50%;
   left: 50%;
-  transform: translate(-50%, -50%);
+  transform: translate(-50%, -50%) scale(var(--iz, 1));
   width: 38px;
   height: 38px;
   border-radius: 50%;
@@ -171,6 +186,15 @@ body {
   border-radius: 3px;
   display: none;
   z-index: 4;
+  transform: scale(var(--iz, 1));
+}
+
+.cmp-before {
+  transform-origin: left bottom;
+}
+
+.cmp-after {
+  transform-origin: right bottom;
 }
 
 #compare-wrap.comparing .cmp-label {

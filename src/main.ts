@@ -4,6 +4,7 @@ import { open as openDialog, save as saveDialog, message } from "@tauri-apps/plu
 
 // ---- 필름 시뮬레이션 목록 (process.rs의 recipe()와 id가 일치해야 함) ----
 const FILMS = [
+  { id: "fuji_style", name: "Fuji Style", desc: "기본 필름 LUT" },
   { id: "provia", name: "Provia", desc: "표준" },
   { id: "velvia", name: "Velvia", desc: "선명·고채도" },
   { id: "astia", name: "Astia", desc: "부드러움" },
@@ -28,7 +29,7 @@ interface Params {
 }
 
 const DEFAULTS: Params = {
-  film: "provia",
+  film: "fuji_style",
   exposure: 0,
   contrast: 0,
   saturation: 0,
@@ -369,6 +370,8 @@ function fitScale(): number {
 
 function applyTransform() {
   compareWrapEl.style.transform = `translate(${tx}px, ${ty}px) scale(${zoom})`;
+  // 구분선·핸들·라벨이 줌과 무관하게 화면에서 같은 크기로 보이게 역보정 값 전달
+  compareWrapEl.style.setProperty("--iz", String(1 / zoom));
   compareWrapEl.style.cursor = zoom > 1.001 ? "grab" : "";
   updateZoomInfo();
 }

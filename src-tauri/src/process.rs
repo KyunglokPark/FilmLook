@@ -491,10 +491,31 @@ pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
         }
     }
 
-    // 실측 여부 기록 — 스무딩은 추정(채움) 격자점에만 적용해 실측 색을 보존한다
+    // 실측 여부 기록
     let measured = filled.clone();
 
-    // 빈 격자점을 이웃 평균으로 반복 전파
+    // ---- 델타 공간으로 변환 ------------------------------------------------------
+    // 절대색 대신 (출력 − 입력) 오프셋을 저장한다. 미측정 영역을 절대색으로 채우면
+    // 서로 다른 입력이 같은 출력으로 수렴해 질감(디테일)이 뭉개진다 — 델타로 채우면
+    // "이웃과 같은 방향으로 이동"만 물려받고 입력 간 차이는 그대로 보존된다.
+    let ident = |idx: usize| -> (f32, f32, f32) {
+        (
+            (idx % size) as f32 / max,
+            ((idx / size) % size) as f32 / max,
+            (idx / (size * size)) as f32 / max,
+        )
+    };
+    let mut delta = vec![0f32; n3 * 3];
+    for idx in 0..n3 {
+        if measured[idx] {
+            let (ir, ig, ib) = ident(idx);
+            delta[idx * 3] = data[idx * 3] - ir;
+            delta[idx * 3 + 1] = data[idx * 3 + 1] - ig;
+            delta[idx * 3 + 2] = data[idx * 3 + 2] - ib;
+        }
+    }
+
+    // 빈 격자점의 델타를 이웃 평균으로 반복 전파
     let neighbors = |idx: usize| -> [Option<usize>; 6] {
         let r = idx % size;
         let g = (idx / size) % size;
@@ -519,16 +540,16 @@ pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
             let mut cnt = 0;
             for nb in neighbors(idx).into_iter().flatten() {
                 if snapshot[nb] {
-                    sum[0] += data[nb * 3];
-                    sum[1] += data[nb * 3 + 1];
-                    sum[2] += data[nb * 3 + 2];
+                    sum[0] += delta[nb * 3];
+                    sum[1] += delta[nb * 3 + 1];
+                    sum[2] += delta[nb * 3 + 2];
                     cnt += 1;
                 }
             }
             if cnt > 0 {
-                data[idx * 3] = sum[0] / cnt as f32;
-                data[idx * 3 + 1] = sum[1] / cnt as f32;
-                data[idx * 3 + 2] = sum[2] / cnt as f32;
+                delta[idx * 3] = sum[0] / cnt as f32;
+                delta[idx * 3 + 1] = sum[1] / cnt as f32;
+                delta[idx * 3 + 2] = sum[2] / cnt as f32;
                 filled[idx] = true;
                 progressed = true;
             }
@@ -537,19 +558,11 @@ pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
             break;
         }
     }
-    // 그래도 남으면(이론상 없음) 항등값
-    for idx in 0..n3 {
-        if !filled[idx] {
-            data[idx * 3] = (idx % size) as f32 / max;
-            data[idx * 3 + 1] = ((idx / size) % size) as f32 / max;
-            data[idx * 3 + 2] = (idx / (size * size)) as f32 / max;
-        }
-    }
+    // (채워지지 않은 셀은 델타 0 = 항등)
 
-    // 스무딩 — 격자 노이즈(물·하늘의 얼룩) 제거.
-    // 실측 셀은 아주 가볍게(85/15), 추정 셀은 더 세게(50/50).
-    // 이로 인해 깎이는 전체 채도·대비는 calibrate_lut()가 목표 통계로 복원한다.
-    let src_d = data.clone();
+    // 델타 스무딩 — 격자 노이즈 제거. 델타를 스무딩하면 절대색과 달리
+    // 입력 간 기울기(질감)를 누르지 않는다. 실측 90/10, 추정 50/50.
+    let src_d = delta.clone();
     for idx in 0..n3 {
         let mut sum = [0f32; 3];
         let mut cnt = 0;
@@ -562,12 +575,39 @@ pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
         if cnt > 0 {
             let keep = if measured[idx] { 0.9 } else { 0.5 };
             for c in 0..3 {
-                data[idx * 3 + c] = src_d[idx * 3 + c] * keep + sum[c] / cnt as f32 * (1.0 - keep);
+                delta[idx * 3 + c] = src_d[idx * 3 + c] * keep + sum[c] / cnt as f32 * (1.0 - keep);
             }
         }
     }
 
+    // 최종: 항등 + 델타, 색역을 벗어나면 밝기를 보존한 채 채도만 압축
+    // (하드 클리핑하면 진한 빨강(김치 고춧가루)의 질감이 평평하게 날아간다)
+    for idx in 0..n3 {
+        let (ir, ig, ib) = ident(idx);
+        let (r, g, b) = fit_gamut(ir + delta[idx * 3], ig + delta[idx * 3 + 1], ib + delta[idx * 3 + 2]);
+        data[idx * 3] = r;
+        data[idx * 3 + 1] = g;
+        data[idx * 3 + 2] = b;
+    }
+
     Lut3d { size, data }
+}
+
+/// 색역 압축 — [0,1]을 벗어난 색을 밝기는 유지한 채 채도만 줄여 맞춘다.
+#[inline]
+fn fit_gamut(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let l = luma(r, g, b).clamp(0.0, 1.0);
+    let (dr, dg, db) = (r - l, g - l, b - l);
+    let mut t = 1f32;
+    for d in [dr, dg, db] {
+        if l + d > 1.0 && d > 1e-6 {
+            t = t.min((1.0 - l) / d);
+        } else if l + d < 0.0 && d < -1e-6 {
+            t = t.min(l / -d);
+        }
+    }
+    let t = t.clamp(0.0, 1.0);
+    (l + dr * t, l + dg * t, l + db * t)
 }
 
 /// 추출된 LUT 자동 캘리브레이션 — 격자 평균 때문에 뭉개진 대비·채도를
@@ -625,9 +665,11 @@ pub fn calibrate_lut(lut: &mut Lut3d, src: &[u8], dst: &[u8], count: usize) {
         let t = ((c - 0.06) / 0.20).clamp(0.0, 1.0);
         let t = t * t * (3.0 - 2.0 * t);
         let g_w = 1.0 + (gain_c - 1.0) * t;
-        lut.data[i * 3] = (nl + (r - l) * g_w).clamp(0.0, 1.0);
-        lut.data[i * 3 + 1] = (nl + (g - l) * g_w).clamp(0.0, 1.0);
-        lut.data[i * 3 + 2] = (nl + (b_ - l) * g_w).clamp(0.0, 1.0);
+        // 하드 클리핑 대신 색역 압축 — 진한 색의 질감(채널 간 변화)을 보존
+        let (nr, ng, nb) = fit_gamut(nl + (r - l) * g_w, nl + (g - l) * g_w, nl + (b_ - l) * g_w);
+        lut.data[i * 3] = nr;
+        lut.data[i * 3 + 1] = ng;
+        lut.data[i * 3 + 2] = nb;
     }
 }
 
@@ -660,6 +702,37 @@ fn user_contrast(x: f32, amt: f32) -> f32 {
     }
 }
 
+/// 분리형 박스 블러 (가로+세로, 프리픽스 합 O(n)) — 디테일 재주입용 저주파 추출
+fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
+    let mut tmp = vec![0f32; w * h];
+    let mut out = vec![0f32; w * h];
+    let mut prefix = vec![0f32; w.max(h) + 1];
+    // 가로
+    for y in 0..h {
+        let row = &src[y * w..y * w + w];
+        for x in 0..w {
+            prefix[x + 1] = prefix[x] + row[x];
+        }
+        for x in 0..w {
+            let lo = x.saturating_sub(r);
+            let hi = (x + r + 1).min(w);
+            tmp[y * w + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+        }
+    }
+    // 세로
+    for x in 0..w {
+        for y in 0..h {
+            prefix[y + 1] = prefix[y] + tmp[y * w + x];
+        }
+        for y in 0..h {
+            let lo = y.saturating_sub(r);
+            let hi = (y + r + 1).min(h);
+            out[y * w + x] = (prefix[hi] - prefix[lo]) / (hi - lo) as f32;
+        }
+    }
+    out
+}
+
 #[inline]
 fn hash_noise(x: u32, y: u32, seed: u32) -> f32 {
     let mut h = x
@@ -680,7 +753,8 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
 
     let rec = recipe(&p.film);
     let tone = curve_lut(rec.curve);
-    let use_lut = p.film == "lut" && lut.is_some();
+    // "lut"(사용자 로드/추출) 및 내장 LUT 필름("fuji_style" 등)은 전달된 LUT로 처리
+    let use_lut = lut.is_some() && matches!(p.film.as_str(), "lut" | "fuji_style");
 
     // 화이트밸런스: 사용자 색온도 × 필름 자체 WB
     let t = p.temperature.clamp(-1.0, 1.0);
@@ -696,10 +770,21 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         let mut b = clamp01(rgb[i * 3 + 2] as f32 / 255.0 * wb_b * ev);
 
         if use_lut {
+            // 채도 증폭 상한: 출력 크로마가 입력 크로마의 배수 한도를 넘지 못하게.
+            // 실내 조명 때문에 살짝 웜한 "흰" 그릇을 LUT가 증폭해 간장 담긴 것처럼
+            // 보이는 걸 막는다. 밝은 영역일수록 한도를 더 조인다 — 그릇 하이라이트는
+            // 밝고(흰 사기), 음식은 상대적으로 어두워서 이 기준으로 분리된다.
+            let cin = r.max(g).max(b) - r.min(g).min(b);
             let (lr, lg, lb) = lut.unwrap().sample(r, g, b);
-            r = lr;
-            g = lg;
-            b = lb;
+            let cout = lr.max(lg).max(lb) - lr.min(lg).min(lb);
+            let lo = luma(lr, lg, lb);
+            let t = ((lo - 0.55) / 0.30).clamp(0.0, 1.0);
+            let t = t * t * (3.0 - 2.0 * t); // 밝기 가중 (0=어두움, 1=하이라이트)
+            let allowed = (cin * (1.7 - 0.7 * t) + 0.02 * (1.0 - t)).min(0.7 - 0.45 * t);
+            let k = if cout > allowed { allowed / cout.max(1e-6) } else { 1.0 };
+            r = clamp01(lo + (lr - lo) * k);
+            g = clamp01(lo + (lg - lo) * k);
+            b = clamp01(lo + (lb - lo) * k);
         } else if rec.bw {
             // 흑백 (붉은 감도 가중) → 톤커브
             let gy = clamp01(0.30 * r + 0.59 * g + 0.11 * b);
@@ -758,6 +843,37 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         buf[i * 3] = r;
         buf[i * 3 + 1] = g;
         buf[i * 3 + 2] = b;
+    }
+
+    // ---- 디테일 재주입 ------------------------------------------------------------
+    // 색 변환(특히 LUT)이 비슷한 색들을 한 색으로 모으면 미세 명암(질감)이 사라진다
+    // (예: 김치 고춧가루가 덩어리로). 원본의 고주파 밝기 성분과 결과물의 고주파를
+    // 비교해, 잃어버린 만큼을 되살린다 — 색감은 룩을 따르고 질감은 원본을 따른다.
+    {
+        let k = if use_lut { 0.9 } else { 0.35 }; // 내장 레시피는 의도된 소프트함을 존중
+        // 이미지 크기에 비례한 반경 (미리보기/원본 저장에서 같은 체감)
+        let radius = ((w_us.min(h_us) / 400).max(1)).min(8);
+        let mut y0 = vec![0f32; n];
+        let mut y1 = vec![0f32; n];
+        for i in 0..n {
+            y0[i] = luma(
+                rgb[i * 3] as f32 / 255.0,
+                rgb[i * 3 + 1] as f32 / 255.0,
+                rgb[i * 3 + 2] as f32 / 255.0,
+            );
+            y1[i] = luma(buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]);
+        }
+        let b0 = box_blur(&y0, w_us, h_us, radius);
+        let b1 = box_blur(&y1, w_us, h_us, radius);
+        for i in 0..n {
+            // 원본 고주파 − 결과 고주파 = 변환으로 사라진 디테일
+            let d = ((y0[i] - b0[i]) - (y1[i] - b1[i])) * k;
+            if d.abs() > 0.0005 {
+                buf[i * 3] = clamp01(buf[i * 3] + d);
+                buf[i * 3 + 1] = clamp01(buf[i * 3 + 1] + d);
+                buf[i * 3 + 2] = clamp01(buf[i * 3 + 2] + d);
+            }
+        }
     }
 
     // ---- 샤픈 (언샵 마스크) ----

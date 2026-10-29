@@ -20,6 +20,22 @@ use process::{Lut3d, Params};
 /// 미리보기 긴 변 (px)
 const PREVIEW_MAX: u32 = 1400;
 
+/// 내장 필름 LUT — 빌드에 임베드되어 항상 사용 가능 (형이 추출한 Fuji Style)
+fn builtin_fuji() -> Option<&'static Lut3d> {
+    static FUJI: std::sync::OnceLock<Option<Lut3d>> = std::sync::OnceLock::new();
+    FUJI.get_or_init(|| process::parse_cube(include_str!("../luts/Fuji_Style.cube")).ok())
+        .as_ref()
+}
+
+/// 필름 id에 맞는 LUT 선택 — 내장 필름이면 임베드 LUT, "lut"이면 사용자 로드 LUT
+fn select_lut<'a>(film: &str, user: &'a Option<Lut3d>) -> Option<&'a Lut3d> {
+    match film {
+        "fuji_style" => builtin_fuji(),
+        "lut" => user.as_ref(),
+        _ => None,
+    }
+}
+
 struct Loaded {
     /// 원본 RGB (EXIF 회전 반영됨)
     full: RgbImage,
@@ -245,7 +261,7 @@ fn render_preview(state: State<ImgState>, params: Params) -> Result<String, Stri
     let loaded = guard.as_ref().ok_or("열린 이미지가 없습니다")?;
     let lut_guard = state.lut.lock().unwrap();
     let (w, h) = loaded.preview.dimensions();
-    let out = process::apply(loaded.preview.as_raw(), w, h, &params, lut_guard.as_ref());
+    let out = process::apply(loaded.preview.as_raw(), w, h, &params, select_lut(&params.film, &lut_guard));
     let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
     to_data_url(&img, 88)
 }
@@ -257,7 +273,7 @@ fn render_full(state: State<ImgState>, params: Params) -> Result<String, String>
     let loaded = guard.as_ref().ok_or("열린 이미지가 없습니다")?;
     let lut_guard = state.lut.lock().unwrap();
     let (w, h) = loaded.full.dimensions();
-    let out = process::apply(loaded.full.as_raw(), w, h, &params, lut_guard.as_ref());
+    let out = process::apply(loaded.full.as_raw(), w, h, &params, select_lut(&params.film, &lut_guard));
     let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
     to_data_url(&img, 90)
 }
@@ -277,7 +293,7 @@ fn save_image(state: State<ImgState>, path: String, params: Params) -> Result<()
     let loaded = guard.as_ref().ok_or("열린 이미지가 없습니다")?;
     let lut_guard = state.lut.lock().unwrap();
     let (w, h) = loaded.full.dimensions();
-    let out = process::apply(loaded.full.as_raw(), w, h, &params, lut_guard.as_ref());
+    let out = process::apply(loaded.full.as_raw(), w, h, &params, select_lut(&params.film, &lut_guard));
     let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
 
     let lower = path.to_lowercase();
