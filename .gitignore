@@ -25,3 +25,7 @@ dist-ssr
 
 src-tauri/target/
 # src-tauri/gen/android는 커밋 (모바일 프로젝트), schemas만 제외 (src-tauri/.gitignore)
+
+# Android 릴리즈 서명 (비밀 — 커밋 금지)
+src-tauri/filmlook-release.keystore
+src-tauri/gen/android/keystore.properties
