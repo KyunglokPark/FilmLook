@@ -1,4 +1,4 @@
-// iDFilm — 후지필름 감성 이미지 보정 백엔드.
+// FilmLook — 후지필름 감성 이미지 보정 백엔드.
 // 원본은 메모리에 들고(최대 해상도), 미리보기는 긴 변 1400px로 줄여서
 // 슬라이더가 움직일 때마다 미리보기 버퍼에만 파이프라인을 돌린다 (빠름).
 // 저장할 때만 원본 해상도에 같은 파이프라인을 적용한다.
@@ -260,7 +260,7 @@ fn extract_lut(state: State<ImgState>, before: String, after: String) -> Result<
 fn export_lut(state: State<ImgState>, path: String) -> Result<(), String> {
     let guard = state.lut.lock().unwrap();
     let lut = guard.as_ref().ok_or("내보낼 LUT가 없습니다")?;
-    std::fs::write(&path, process::to_cube(lut, "iDFilm extracted")).map_err(err)
+    std::fs::write(&path, process::to_cube(lut, "FilmLook extracted")).map_err(err)
 }
 
 /// 현재 설정으로 미리보기 렌더 (data URL 반환)

@@ -24,4 +24,4 @@ dist-ssr
 *.sw?
 
 src-tauri/target/
-src-tauri/gen/
+# src-tauri/gen/android는 커밋 (모바일 프로젝트), schemas만 제외 (src-tauri/.gitignore)

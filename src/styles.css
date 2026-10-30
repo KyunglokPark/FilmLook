@@ -373,6 +373,27 @@ body {
   margin-top: 3px;
 }
 
+/* Fuji Style 강도 불 3개 */
+.film .dots {
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.film .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3a3a3e;
+  transition: background 0.15s;
+}
+
+.film .dot.on {
+  background: #e8c468;
+  box-shadow: 0 0 5px rgba(232, 196, 104, 0.7);
+}
+
 .lut-tools {
   display: flex;
   flex-direction: column;

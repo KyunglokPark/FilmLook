@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "iDFilm",
-  "mainBinaryName": "iDFilm",
+  "productName": "FilmLook",
+  "mainBinaryName": "FilmLook",
   "version": "0.1.0",
-  "identifier": "com.idoit.idfilm",
+  "identifier": "com.idoit.filmlook",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1434",
@@ -14,7 +14,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "iDFilm",
+        "title": "FilmLook",
         "width": 1280,
         "height": 820,
         "minWidth": 720,

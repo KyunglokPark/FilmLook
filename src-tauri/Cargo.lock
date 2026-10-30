@@ -959,6 +959,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmlook"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "image",
+ "kamadak-exif",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1639,20 +1653,6 @@ name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9e0384b61958566e926dc50660321d12159025e767c18e043daf26b70104c39"
-
-[[package]]
-name = "idfilm"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "image",
- "kamadak-exif",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
-]
 
 [[package]]
 name = "idna"

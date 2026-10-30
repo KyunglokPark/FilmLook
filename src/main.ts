@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog, message } from "@tauri-apps/plugin-dialog";
 
 /// 폴더 일괄 처리 결과가 저장되는 하위 폴더 이름 (앱 이름 확정되면 여기만 바꾸면 됨)
-const BATCH_OUT_NAME = "iDFilm";
+const BATCH_OUT_NAME = "FilmLook";
 
 // ---- 필름 시뮬레이션 목록 (process.rs의 recipe()와 id가 일치해야 함) ----
 const FILMS = [
@@ -31,6 +31,7 @@ interface Params {
   grain: number;
   vignette: number;
   skin: number;
+  lutStrength: number;
 }
 
 const DEFAULTS: Params = {
@@ -43,6 +44,7 @@ const DEFAULTS: Params = {
   grain: 0,
   vignette: 0,
   skin: 0,
+  lutStrength: 1,
 };
 
 // 슬라이더 정의: [키, 라벨, 최소, 최대, 스텝]
@@ -123,6 +125,10 @@ async function doRender() {
   }
 }
 
+// ---- Fuji Style 3단계 (불 3개, 누를 때마다 강해짐) ----
+let fujiLevel = 3; // 1..3 — 기본 최대(지금까지의 룩)
+const FUJI_STRENGTH = [0.45, 0.72, 1.0];
+
 // ---- UI 구성 ----
 function renderFilms() {
   filmsEl.innerHTML = "";
@@ -136,11 +142,36 @@ function renderFilms() {
     d.className = "fdesc";
     d.textContent = f.desc;
     card.append(n, d);
-    card.addEventListener("click", () => {
-      params.film = f.id;
-      renderFilms();
-      scheduleRender(0);
-    });
+
+    if (f.id === "fuji_style") {
+      // 강도 불 3개
+      d.textContent = `강도 ${fujiLevel}/3`;
+      const dots = document.createElement("div");
+      dots.className = "dots";
+      for (let i = 1; i <= 3; i++) {
+        const dot = document.createElement("span");
+        dot.className = "dot" + (i <= fujiLevel ? " on" : "");
+        dots.appendChild(dot);
+      }
+      card.appendChild(dots);
+      card.addEventListener("click", () => {
+        if (params.film === "fuji_style") {
+          fujiLevel = (fujiLevel % 3) + 1; // 1→2→3→1 순환
+        } else {
+          params.film = "fuji_style";
+        }
+        params.lutStrength = FUJI_STRENGTH[fujiLevel - 1];
+        renderFilms();
+        scheduleRender(0);
+      });
+    } else {
+      card.addEventListener("click", () => {
+        params.film = f.id;
+        params.lutStrength = 1;
+        renderFilms();
+        scheduleRender(0);
+      });
+    }
     filmsEl.appendChild(card);
   }
 
@@ -157,6 +188,7 @@ function renderFilms() {
   lutCard.addEventListener("click", () => {
     if (lutName) {
       params.film = "lut";
+      params.lutStrength = 1;
       renderFilms();
       scheduleRender(0);
     } else {
@@ -189,13 +221,14 @@ async function extractRecipe() {
     const info = await invoke<string>("extract_lut", { before, after });
     lutName = `추출 레시피 ${info}`;
     params.film = "lut";
+    params.lutStrength = 1;
     exportLutBtn.disabled = false;
     renderFilms();
     scheduleRender(0);
     statusEl.textContent = "레시피 추출 완료 — 지금 보이는 게 적용된 결과야";
   } catch (e) {
     statusEl.textContent = String(e);
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   } finally {
     busyEl.classList.add("hidden");
   }
@@ -211,7 +244,7 @@ async function exportLut() {
     await invoke("export_lut", { path: picked });
     statusEl.textContent = `LUT 저장됨: ${baseName(picked)}`;
   } catch (e) {
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   }
 }
 
@@ -231,7 +264,7 @@ async function pickLut() {
     renderFilms();
     scheduleRender(0);
   } catch (e) {
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   } finally {
     busyEl.classList.add("hidden");
   }
@@ -330,7 +363,7 @@ async function loadImagePath(picked: string) {
     scheduleRender(0);
   } catch (e) {
     statusEl.textContent = String(e);
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   } finally {
     busyEl.classList.add("hidden");
   }
@@ -340,7 +373,7 @@ async function saveImage() {
   if (!filePath) return;
   const base = baseName(filePath);
   const dot = base.lastIndexOf(".");
-  const suggested = (dot > 0 ? base.slice(0, dot) : base) + "_idfilm.jpg";
+  const suggested = (dot > 0 ? base.slice(0, dot) : base) + "_filmlook.jpg";
   const picked = await saveDialog({
     defaultPath: suggested,
     filters: [
@@ -356,7 +389,7 @@ async function saveImage() {
     statusEl.textContent = `저장됨: ${baseName(picked)}`;
   } catch (e) {
     statusEl.textContent = String(e);
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   } finally {
     busyEl.classList.add("hidden");
   }
@@ -427,7 +460,7 @@ async function openFolder() {
     statusEl.textContent = `${baseName(dir)} — 이미지 ${entries.length}장 · 더블클릭으로 열기`;
   } catch (e) {
     statusEl.textContent = String(e);
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   }
 }
 
@@ -462,7 +495,7 @@ async function batchProcess() {
     statusEl.textContent = `일괄 처리: ${summary}`;
   } catch (e) {
     statusEl.textContent = String(e);
-    await message(String(e), { title: "iDFilm", kind: "error" });
+    await message(String(e), { title: "FilmLook", kind: "error" });
   } finally {
     batchRunning = false;
     updateBatchCount();
@@ -472,6 +505,7 @@ async function batchProcess() {
 
 function resetAll() {
   params = { ...DEFAULTS };
+  fujiLevel = 3;
   renderFilms();
   syncSliders();
   scheduleRender(0);

@@ -1,12 +1,12 @@
 [package]
-name = "idfilm"
+name = "filmlook"
 version = "0.1.0"
-description = "iDFilm — 후지필름 감성 이미지 보정"
+description = "FilmLook — 후지필름 감성 이미지 보정"
 authors = ["IDOIT Inc."]
 edition = "2021"
 
 [lib]
-name = "idfilm_lib"
+name = "filmlook_lib"
 crate-type = ["cdylib", "rlib"]
 
 [build-dependencies]

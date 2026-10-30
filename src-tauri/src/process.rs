@@ -28,6 +28,13 @@ pub struct Params {
     /// 피부 보정 (0..1) — 피부색 영역의 잡티·톤 얼룩 스무딩 (큰 윤곽은 유지)
     #[serde(default)]
     pub skin: f32,
+    /// LUT 강도 (0..1) — 원본과 LUT 결과의 혼합 비율 (Fuji Style 3단계용)
+    #[serde(default = "one")]
+    pub lut_strength: f32,
+}
+
+fn one() -> f32 {
+    1.0
 }
 
 #[inline]
@@ -1094,10 +1101,12 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         if use_lut {
             // LUT가 다항식 기반으로 매끈하게 생성되므로(fit_smooth/refit_lut)
             // 채도 상한·중립 보호 같은 사후 패치 없이 그대로 샘플링한다.
+            // lut_strength로 원본과 혼합 — Fuji Style 1·2·3단계.
+            let s = p.lut_strength.clamp(0.0, 1.0);
             let (lr, lg, lb) = lut.unwrap().sample(r, g, b);
-            r = clamp01(lr);
-            g = clamp01(lg);
-            b = clamp01(lb);
+            r = clamp01(r + (lr - r) * s);
+            g = clamp01(g + (lg - g) * s);
+            b = clamp01(b + (lb - b) * s);
         } else if rec.bw {
             // 흑백 (붉은 감도 가중) → 톤커브
             let gy = clamp01(0.30 * r + 0.59 * g + 0.11 * b);
