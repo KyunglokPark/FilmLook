@@ -72,6 +72,100 @@ body {
   min-height: 0;
 }
 
+#filelist {
+  width: 220px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #202023;
+  border-right: 1px solid #000;
+  min-height: 0;
+}
+
+#filelist.hidden {
+  display: none;
+}
+
+.fl-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2e2e32;
+}
+
+#fl-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #bbb;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 110px;
+}
+
+.fl-head .spacer {
+  flex: 1;
+}
+
+.fl-head button {
+  background: #333;
+  color: #ddd;
+  border: 1px solid #454545;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.fl-head button:hover {
+  background: #3e3e42;
+}
+
+#fl-items {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.fl-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #bbb;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.fl-item input[type="checkbox"] {
+  accent-color: #e8c468;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.fl-item .fl-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fl-item:hover {
+  background: #2a2a2e;
+}
+
+.fl-item.selected {
+  background: #35311f;
+  color: #e8c468;
+}
+
+.fl-item.open {
+  color: #e8c468;
+  font-weight: 700;
+}
+
 #viewer {
   flex: 1;
   position: relative;

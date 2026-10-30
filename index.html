@@ -11,12 +11,24 @@
         <span class="app-name">iDFilm</span>
         <button id="act-open" type="button">열기</button>
         <button id="act-save" type="button" disabled>저장</button>
+        <button id="act-open-folder" type="button" title="폴더를 열어 이미지 목록 보기">폴더 열기</button>
         <button id="act-compare" type="button" disabled title="원본/보정 비교 슬라이더 켜기·끄기">비교</button>
         <span class="spacer"></span>
         <span id="file-info"></span>
       </header>
 
       <div id="main">
+        <!-- 폴더 이미지 목록 (폴더 열기 시 표시) -->
+        <aside id="filelist" class="hidden">
+          <div class="fl-head">
+            <span id="fl-title">폴더</span>
+            <span class="spacer"></span>
+            <button id="fl-batch" type="button" title="이 폴더 전체에 현재 설정 적용">일괄 처리</button>
+            <button id="fl-close" type="button" title="목록 닫기">✕</button>
+          </div>
+          <div id="fl-items"></div>
+        </aside>
+
         <div id="viewer">
           <div id="placeholder">이미지를 열어주세요 (열기 버튼 또는 Ctrl+O)</div>
           <div id="compare-wrap" class="hidden">

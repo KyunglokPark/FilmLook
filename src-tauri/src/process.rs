@@ -25,6 +25,9 @@ pub struct Params {
     pub sharpen: f32,
     pub grain: f32,
     pub vignette: f32,
+    /// 피부 보정 (0..1) — 피부색 영역의 잡티·톤 얼룩 스무딩 (큰 윤곽은 유지)
+    #[serde(default)]
+    pub skin: f32,
 }
 
 #[inline]
@@ -308,6 +311,7 @@ fn hue_dist(a: f32, b: f32) -> f32 {
 
 // ---- 3D LUT --------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Lut3d {
     pub size: usize,
     /// data[(r + g*size + b*size²) * 3] — r이 가장 빠르게 변함
@@ -315,29 +319,67 @@ pub struct Lut3d {
 }
 
 impl Lut3d {
-    /// 삼선형 보간 적용
+    /// 사면체(tetrahedral) 보간 — 삼선형보다 매끄러워 피부 그라데이션에서
+    /// 층(밴딩)이 생기지 않는다 (영화/컬러 그레이딩 업계 표준).
     #[inline]
     pub fn sample(&self, r: f32, g: f32, b: f32) -> (f32, f32, f32) {
         let n = self.size;
         let max = (n - 1) as f32;
-        let (rf, gf, bf) = (r * max, g * max, b * max);
-        let (r0, g0, b0) = (rf as usize, gf as usize, bf as usize);
-        let (r1, g1, b1) = ((r0 + 1).min(n - 1), (g0 + 1).min(n - 1), (b0 + 1).min(n - 1));
+        let (rf, gf, bf) = (r.clamp(0.0, 1.0) * max, g.clamp(0.0, 1.0) * max, b.clamp(0.0, 1.0) * max);
+        let (r0, g0, b0) = ((rf as usize).min(n - 2), (gf as usize).min(n - 2), (bf as usize).min(n - 2));
         let (fr, fg, fb) = (rf - r0 as f32, gf - g0 as f32, bf - b0 as f32);
         let at = |ri: usize, gi: usize, bi: usize| {
             let i = (ri + gi * n + bi * n * n) * 3;
             (self.data[i], self.data[i + 1], self.data[i + 2])
         };
-        let lerp = |a: (f32, f32, f32), b: (f32, f32, f32), t: f32| {
-            (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, a.2 + (b.2 - a.2) * t)
+        let add = |a: (f32, f32, f32), b: (f32, f32, f32), w: f32| {
+            (a.0 + b.0 * w, a.1 + b.1 * w, a.2 + b.2 * w)
         };
-        let c00 = lerp(at(r0, g0, b0), at(r1, g0, b0), fr);
-        let c10 = lerp(at(r0, g1, b0), at(r1, g1, b0), fr);
-        let c01 = lerp(at(r0, g0, b1), at(r1, g0, b1), fr);
-        let c11 = lerp(at(r0, g1, b1), at(r1, g1, b1), fr);
-        let c0 = lerp(c00, c10, fg);
-        let c1 = lerp(c01, c11, fg);
-        lerp(c0, c1, fb)
+        // 단위 큐브를 6개 사면체로 나눠 fr/fg/fb 크기 순서에 맞는 사면체의
+        // 4개 꼭짓점만 가중 합산한다.
+        let p000 = at(r0, g0, b0);
+        let p111 = at(r0 + 1, g0 + 1, b0 + 1);
+        let mut out = (0.0, 0.0, 0.0);
+        if fr >= fg {
+            if fg >= fb {
+                // r ≥ g ≥ b
+                out = add(out, p000, 1.0 - fr);
+                out = add(out, at(r0 + 1, g0, b0), fr - fg);
+                out = add(out, at(r0 + 1, g0 + 1, b0), fg - fb);
+                out = add(out, p111, fb);
+            } else if fr >= fb {
+                // r ≥ b > g
+                out = add(out, p000, 1.0 - fr);
+                out = add(out, at(r0 + 1, g0, b0), fr - fb);
+                out = add(out, at(r0 + 1, g0, b0 + 1), fb - fg);
+                out = add(out, p111, fg);
+            } else {
+                // b > r ≥ g
+                out = add(out, p000, 1.0 - fb);
+                out = add(out, at(r0, g0, b0 + 1), fb - fr);
+                out = add(out, at(r0 + 1, g0, b0 + 1), fr - fg);
+                out = add(out, p111, fg);
+            }
+        } else if fb >= fg {
+            // b ≥ g > r
+            out = add(out, p000, 1.0 - fb);
+            out = add(out, at(r0, g0, b0 + 1), fb - fg);
+            out = add(out, at(r0, g0 + 1, b0 + 1), fg - fr);
+            out = add(out, p111, fr);
+        } else if fb >= fr {
+            // g > b ≥ r
+            out = add(out, p000, 1.0 - fg);
+            out = add(out, at(r0, g0 + 1, b0), fg - fb);
+            out = add(out, at(r0, g0 + 1, b0 + 1), fb - fr);
+            out = add(out, p111, fr);
+        } else {
+            // g ≥ r > b
+            out = add(out, p000, 1.0 - fg);
+            out = add(out, at(r0, g0 + 1, b0), fg - fr);
+            out = add(out, at(r0 + 1, g0 + 1, b0), fr - fb);
+            out = add(out, p111, fb);
+        }
+        out
     }
 }
 
@@ -403,6 +445,7 @@ pub fn parse_hald(rgb: &[u8], w: u32, h: u32) -> Result<Lut3d, String> {
 /// 2패스: ① 전체 평균 → ② 평균에서 많이 벗어난 쌍(정렬 오차·라벨·노이즈)을
 /// 버리고 다시 평균 — 물·하늘 같은 저채도 영역의 얼룩(뭉개짐)을 줄인다.
 /// 샘플이 없는 격자점은 이웃 평균으로 채운 뒤 가볍게 스무딩한다.
+#[allow(dead_code)] // 격자 직접 피팅 — 다항식(fit_smooth)으로 대체, 참고용 보존
 pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
     let n3 = size * size * size;
     let max = (size - 1) as f32;
@@ -593,6 +636,271 @@ pub fn fit_lut(src: &[u8], dst: &[u8], count: usize, size: usize) -> Lut3d {
     Lut3d { size, data }
 }
 
+// ---- 3차 다항식 색 변환 피팅 ------------------------------------------------------
+// 격자 LUT를 픽셀 쌍으로 직접 채우면(fit_lut) 미측정 영역을 이웃에서 메꾸며
+// 생기는 셀 노이즈가 피부 밴딩·중립색 오염(간장 그릇)의 근본 원인이 된다.
+// 대신 매끈함이 구조적으로 보장되는 3차 다항식 f: RGB→RGB를 최소자승으로 맞추고,
+// 그 함수를 샘플링해 LUT를 만든다 — 불연속이 아예 없어 밴딩이 생길 수 없다.
+
+/// 3차 다항식 기저 (20항)
+#[inline]
+fn poly_basis(r: f32, g: f32, b: f32) -> [f32; 20] {
+    [
+        1.0,
+        r,
+        g,
+        b,
+        r * r,
+        g * g,
+        b * b,
+        r * g,
+        r * b,
+        g * b,
+        r * r * r,
+        g * g * g,
+        b * b * b,
+        r * r * g,
+        r * r * b,
+        g * g * r,
+        g * g * b,
+        b * b * r,
+        b * b * g,
+        r * g * b,
+    ]
+}
+
+/// 가우스 소거(부분 피벗)로 20×20 선형계 3개(채널별)를 푼다.
+fn solve_normal(a: &[[f64; 20]; 20], rhs: &[[f64; 20]; 3]) -> Option<[[f32; 20]; 3]> {
+    // 증강행렬 [A | rhs_r rhs_g rhs_b]
+    let mut m = [[0f64; 23]; 20];
+    for i in 0..20 {
+        for j in 0..20 {
+            m[i][j] = a[i][j];
+        }
+        for c in 0..3 {
+            m[i][20 + c] = rhs[c][i];
+        }
+    }
+    for col in 0..20 {
+        // 피벗
+        let mut piv = col;
+        for row in col + 1..20 {
+            if m[row][col].abs() > m[piv][col].abs() {
+                piv = row;
+            }
+        }
+        if m[piv][col].abs() < 1e-12 {
+            return None;
+        }
+        m.swap(col, piv);
+        let d = m[col][col];
+        for j in col..23 {
+            m[col][j] /= d;
+        }
+        for row in 0..20 {
+            if row != col {
+                let f = m[row][col];
+                if f != 0.0 {
+                    for j in col..23 {
+                        m[row][j] -= f * m[col][j];
+                    }
+                }
+            }
+        }
+    }
+    let mut out = [[0f32; 20]; 3];
+    for c in 0..3 {
+        for i in 0..20 {
+            out[c][i] = m[i][20 + c] as f32;
+        }
+    }
+    Some(out)
+}
+
+/// 픽셀 쌍 (src→dst, u8 RGB)에 3차 다항식을 최소자승 피팅.
+/// use_mask가 Some이면 true인 쌍만 사용 (이상치 제거 2차 피팅용).
+fn fit_poly(src: &[u8], dst: &[u8], count: usize, use_mask: Option<&[bool]>) -> Option<[[f32; 20]; 3]> {
+    let mut a = [[0f64; 20]; 20];
+    let mut rhs = [[0f64; 20]; 3];
+    for i in 0..count {
+        if let Some(mask) = use_mask {
+            if !mask[i] {
+                continue;
+            }
+        }
+        let phi = poly_basis(
+            src[i * 3] as f32 / 255.0,
+            src[i * 3 + 1] as f32 / 255.0,
+            src[i * 3 + 2] as f32 / 255.0,
+        );
+        let d = [
+            dst[i * 3] as f64 / 255.0,
+            dst[i * 3 + 1] as f64 / 255.0,
+            dst[i * 3 + 2] as f64 / 255.0,
+        ];
+        for p in 0..20 {
+            let fp = phi[p] as f64;
+            for q in p..20 {
+                a[p][q] += fp * phi[q] as f64;
+            }
+            for c in 0..3 {
+                rhs[c][p] += fp * d[c];
+            }
+        }
+    }
+    // 대칭 보완
+    for p in 0..20 {
+        for q in 0..p {
+            a[p][q] = a[q][p];
+        }
+    }
+    solve_normal(&a, &rhs)
+}
+
+#[inline]
+fn poly_eval(coef: &[[f32; 20]; 3], r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let phi = poly_basis(r, g, b);
+    let mut out = [0f32; 3];
+    for (c, oc) in out.iter_mut().enumerate() {
+        let mut s = 0f32;
+        for p in 0..20 {
+            s += coef[c][p] * phi[p];
+        }
+        *oc = s;
+    }
+    (out[0], out[1], out[2])
+}
+
+/// 다항식을 샘플링해 LUT 생성 (색역은 밝기 보존 압축)
+fn poly_to_lut(coef: &[[f32; 20]; 3], size: usize) -> Lut3d {
+    let max = (size - 1) as f32;
+    let mut data = vec![0f32; size * size * size * 3];
+    for bi in 0..size {
+        for gi in 0..size {
+            for ri in 0..size {
+                let (r, g, b) = poly_eval(coef, ri as f32 / max, gi as f32 / max, bi as f32 / max);
+                let (r, g, b) = fit_gamut(r, g, b);
+                let idx = (ri + gi * size + bi * size * size) * 3;
+                data[idx] = r;
+                data[idx + 1] = g;
+                data[idx + 2] = b;
+            }
+        }
+    }
+    Lut3d { size, data }
+}
+
+/// 전/후 픽셀 쌍 → 매끈한 변환 LUT (3차 다항식, 이상치 제거 2패스)
+pub fn fit_smooth(src: &[u8], dst: &[u8], count: usize) -> Result<Lut3d, String> {
+    let coef1 = fit_poly(src, dst, count, None).ok_or("피팅 실패 (샘플 부족)")?;
+    // 1차 피팅 잔차가 큰 쌍(정렬 오차·라벨·노이즈)을 버리고 다시 피팅
+    let mut mask = vec![true; count];
+    for i in 0..count {
+        let (pr, pg, pb) = poly_eval(
+            &coef1,
+            src[i * 3] as f32 / 255.0,
+            src[i * 3 + 1] as f32 / 255.0,
+            src[i * 3 + 2] as f32 / 255.0,
+        );
+        let dr = pr - dst[i * 3] as f32 / 255.0;
+        let dg = pg - dst[i * 3 + 1] as f32 / 255.0;
+        let db = pb - dst[i * 3 + 2] as f32 / 255.0;
+        if (dr * dr + dg * dg + db * db).sqrt() > 0.09 {
+            mask[i] = false;
+        }
+    }
+    let coef = fit_poly(src, dst, count, Some(&mask)).unwrap_or(coef1);
+    Ok(poly_to_lut(&coef, 33))
+}
+
+/// 기존(노이즈 있는) LUT를 다항식으로 리핏해 매끈한 LUT로 재생성 —
+/// 옛 추출 방식으로 구운 임베드 LUT(Fuji_Style)의 밴딩·오염 제거용.
+pub fn refit_lut(lut: &Lut3d) -> Lut3d {
+    let n3 = lut.size * lut.size * lut.size;
+    let max = (lut.size - 1) as f32;
+    let mut src = vec![0u8; n3 * 3];
+    let mut dst = vec![0u8; n3 * 3];
+    for idx in 0..n3 {
+        src[idx * 3] = ((idx % lut.size) as f32 / max * 255.0) as u8;
+        src[idx * 3 + 1] = (((idx / lut.size) % lut.size) as f32 / max * 255.0) as u8;
+        src[idx * 3 + 2] = ((idx / (lut.size * lut.size)) as f32 / max * 255.0) as u8;
+        for c in 0..3 {
+            dst[idx * 3 + c] = (lut.data[idx * 3 + c] * 255.0 + 0.5) as u8;
+        }
+    }
+    fit_smooth(&src, &dst, n3).unwrap_or_else(|_| lut.clone())
+}
+
+/// LUT 스무딩 (델타 공간, 다중 패스) — 이웃 격자점 간 값이 들쭉날쭉하면
+/// 피부처럼 매끈한 그라데이션에서 등고선(밴딩)이 생긴다. 입력-출력 오프셋을
+/// 6-이웃 평균과 혼합해 매핑을 매끈하게 만든다. (색 디테일 손실은
+/// calibrate_lut가, 공간 디테일은 디테일 재주입이 보상한다)
+pub fn smooth_lut(lut: &mut Lut3d, passes: usize, keep: f32) {
+    let size = lut.size;
+    let n3 = size * size * size;
+    let max = (size - 1) as f32;
+    let ident = |idx: usize| -> (f32, f32, f32) {
+        (
+            (idx % size) as f32 / max,
+            ((idx / size) % size) as f32 / max,
+            (idx / (size * size)) as f32 / max,
+        )
+    };
+    let mut delta = vec![0f32; n3 * 3];
+    for idx in 0..n3 {
+        let (ir, ig, ib) = ident(idx);
+        delta[idx * 3] = lut.data[idx * 3] - ir;
+        delta[idx * 3 + 1] = lut.data[idx * 3 + 1] - ig;
+        delta[idx * 3 + 2] = lut.data[idx * 3 + 2] - ib;
+    }
+    for _ in 0..passes {
+        let src = delta.clone();
+        for idx in 0..n3 {
+            let r = idx % size;
+            let g = (idx / size) % size;
+            let b = idx / (size * size);
+            let mut sum = [0f32; 3];
+            let mut cnt = 0;
+            let mut acc = |nb: usize| {
+                sum[0] += src[nb * 3];
+                sum[1] += src[nb * 3 + 1];
+                sum[2] += src[nb * 3 + 2];
+                cnt += 1;
+            };
+            if r > 0 {
+                acc(idx - 1);
+            }
+            if r + 1 < size {
+                acc(idx + 1);
+            }
+            if g > 0 {
+                acc(idx - size);
+            }
+            if g + 1 < size {
+                acc(idx + size);
+            }
+            if b > 0 {
+                acc(idx - size * size);
+            }
+            if b + 1 < size {
+                acc(idx + size * size);
+            }
+            if cnt > 0 {
+                for c in 0..3 {
+                    delta[idx * 3 + c] = src[idx * 3 + c] * keep + sum[c] / cnt as f32 * (1.0 - keep);
+                }
+            }
+        }
+    }
+    for idx in 0..n3 {
+        let (ir, ig, ib) = ident(idx);
+        let (r, g, b) = fit_gamut(ir + delta[idx * 3], ig + delta[idx * 3 + 1], ib + delta[idx * 3 + 2]);
+        lut.data[idx * 3] = r;
+        lut.data[idx * 3 + 1] = g;
+        lut.data[idx * 3 + 2] = b;
+    }
+}
+
 /// 색역 압축 — [0,1]을 벗어난 색을 밝기는 유지한 채 채도만 줄여 맞춘다.
 #[inline]
 fn fit_gamut(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
@@ -614,6 +922,7 @@ fn fit_gamut(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 /// 목표(after) 사진의 통계에 맞춰 복원한다.
 /// ① src를 LUT로 변환한 결과와 dst의 밝기 평균/표준편차를 맞추고(대비),
 /// ② 채도(크로마) 평균 비율만큼 LUT 전체의 크로마를 키운다(진하게).
+#[allow(dead_code)] // 격자 피팅용 보정 — 다항식 전환으로 미사용, 참고용 보존
 pub fn calibrate_lut(lut: &mut Lut3d, src: &[u8], dst: &[u8], count: usize) {
     let mut m_l = 0f64; // 매핑 결과 밝기 합
     let mut m_l2 = 0f64;
@@ -733,6 +1042,19 @@ fn box_blur(src: &[f32], w: usize, h: usize, r: usize) -> Vec<f32> {
     out
 }
 
+/// 피부색 확률 (0..1) — YCbCr 범위 기반. 입력은 0..1 RGB.
+/// 채도 상한 예외(얼굴 밴딩 방지)와 피부 보정 마스크에 공용.
+#[inline]
+fn skin_prob(r: f32, g: f32, b: f32) -> f32 {
+    let (r, g, b) = (r * 255.0, g * 255.0, b * 255.0);
+    let cb = 128.0 - 0.168_736 * r - 0.331_264 * g + 0.5 * b;
+    let cr = 128.0 + 0.5 * r - 0.418_688 * g - 0.081_312 * b;
+    let mb = 1.0 - ((cb - 102.0).abs() / 25.0).clamp(0.0, 1.0);
+    let mr = 1.0 - ((cr - 153.0).abs() / 20.0).clamp(0.0, 1.0);
+    let m = (mb * mr).clamp(0.0, 1.0);
+    m * m * (3.0 - 2.0 * m)
+}
+
 #[inline]
 fn hash_noise(x: u32, y: u32, seed: u32) -> f32 {
     let mut h = x
@@ -770,21 +1092,12 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         let mut b = clamp01(rgb[i * 3 + 2] as f32 / 255.0 * wb_b * ev);
 
         if use_lut {
-            // 채도 증폭 상한: 출력 크로마가 입력 크로마의 배수 한도를 넘지 못하게.
-            // 실내 조명 때문에 살짝 웜한 "흰" 그릇을 LUT가 증폭해 간장 담긴 것처럼
-            // 보이는 걸 막는다. 밝은 영역일수록 한도를 더 조인다 — 그릇 하이라이트는
-            // 밝고(흰 사기), 음식은 상대적으로 어두워서 이 기준으로 분리된다.
-            let cin = r.max(g).max(b) - r.min(g).min(b);
+            // LUT가 다항식 기반으로 매끈하게 생성되므로(fit_smooth/refit_lut)
+            // 채도 상한·중립 보호 같은 사후 패치 없이 그대로 샘플링한다.
             let (lr, lg, lb) = lut.unwrap().sample(r, g, b);
-            let cout = lr.max(lg).max(lb) - lr.min(lg).min(lb);
-            let lo = luma(lr, lg, lb);
-            let t = ((lo - 0.55) / 0.30).clamp(0.0, 1.0);
-            let t = t * t * (3.0 - 2.0 * t); // 밝기 가중 (0=어두움, 1=하이라이트)
-            let allowed = (cin * (1.7 - 0.7 * t) + 0.02 * (1.0 - t)).min(0.7 - 0.45 * t);
-            let k = if cout > allowed { allowed / cout.max(1e-6) } else { 1.0 };
-            r = clamp01(lo + (lr - lo) * k);
-            g = clamp01(lo + (lg - lo) * k);
-            b = clamp01(lo + (lb - lo) * k);
+            r = clamp01(lr);
+            g = clamp01(lg);
+            b = clamp01(lb);
         } else if rec.bw {
             // 흑백 (붉은 감도 가중) → 톤커브
             let gy = clamp01(0.30 * r + 0.59 * g + 0.11 * b);
@@ -845,33 +1158,69 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         buf[i * 3 + 2] = b;
     }
 
-    // ---- 디테일 재주입 ------------------------------------------------------------
-    // 색 변환(특히 LUT)이 비슷한 색들을 한 색으로 모으면 미세 명암(질감)이 사라진다
-    // (예: 김치 고춧가루가 덩어리로). 원본의 고주파 밝기 성분과 결과물의 고주파를
-    // 비교해, 잃어버린 만큼을 되살린다 — 색감은 룩을 따르고 질감은 원본을 따른다.
+    // ---- 디테일 재주입 (RGB 채널별) -------------------------------------------------
+    // 색 변환(특히 LUT)이 비슷한 색들을 한 색으로 모으면 미세 질감이 사라지고,
+    // 매끈한 그라데이션(피부)에는 등고선(밴딩)이 생긴다. 채널별로 원본의 고주파와
+    // 결과물의 고주파를 비교해 잃어버린 만큼 되살린다 — 밝기 질감뿐 아니라
+    // 색 등고선의 경계도 원본의 매끈함으로 상쇄된다.
     {
         let k = if use_lut { 0.9 } else { 0.35 }; // 내장 레시피는 의도된 소프트함을 존중
         // 이미지 크기에 비례한 반경 (미리보기/원본 저장에서 같은 체감)
         let radius = ((w_us.min(h_us) / 400).max(1)).min(8);
-        let mut y0 = vec![0f32; n];
-        let mut y1 = vec![0f32; n];
+        let mut c0 = vec![0f32; n];
+        let mut c1 = vec![0f32; n];
+        for ch in 0..3 {
+            for i in 0..n {
+                c0[i] = rgb[i * 3 + ch] as f32 / 255.0;
+                c1[i] = buf[i * 3 + ch];
+            }
+            let b0 = box_blur(&c0, w_us, h_us, radius);
+            let b1 = box_blur(&c1, w_us, h_us, radius);
+            for i in 0..n {
+                // 원본 고주파 − 결과 고주파 = 변환으로 사라진 디테일
+                let d = ((c0[i] - b0[i]) - (c1[i] - b1[i])) * k;
+                if d.abs() > 0.0005 {
+                    buf[i * 3 + ch] = clamp01(buf[i * 3 + ch] + d);
+                }
+            }
+        }
+    }
+
+    // ---- 피부 보정 (잡티·톤 얼룩 스무딩) --------------------------------------------
+    // 원본 색으로 피부색 확률 마스크(YCbCr)를 만들고, 마스크 안에서
+    // 작은 변화(잡티·톤 얼룩)만 블러로 스무딩하고 큰 변화(눈·입·윤곽)는 유지한다.
+    if p.skin > 0.005 {
+        let strength = p.skin.clamp(0.0, 1.0);
+        let r2 = ((w_us.min(h_us) / 160).max(2)).min(12);
+        // 피부 마스크 (원본 기준 — 필터로 색이 변해도 마스크는 안정적)
+        let mut mask = vec![0f32; n];
         for i in 0..n {
-            y0[i] = luma(
+            mask[i] = skin_prob(
                 rgb[i * 3] as f32 / 255.0,
                 rgb[i * 3 + 1] as f32 / 255.0,
                 rgb[i * 3 + 2] as f32 / 255.0,
             );
-            y1[i] = luma(buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]);
         }
-        let b0 = box_blur(&y0, w_us, h_us, radius);
-        let b1 = box_blur(&y1, w_us, h_us, radius);
-        for i in 0..n {
-            // 원본 고주파 − 결과 고주파 = 변환으로 사라진 디테일
-            let d = ((y0[i] - b0[i]) - (y1[i] - b1[i])) * k;
-            if d.abs() > 0.0005 {
-                buf[i * 3] = clamp01(buf[i * 3] + d);
-                buf[i * 3 + 1] = clamp01(buf[i * 3 + 1] + d);
-                buf[i * 3 + 2] = clamp01(buf[i * 3 + 2] + d);
+        // 마스크 자체도 부드럽게 (경계 티 안 나게)
+        let mask = box_blur(&mask, w_us, h_us, r2);
+        // 채널별 저주파 + "작은 변화만 눌러주기"
+        let mut ch = vec![0f32; n];
+        for c in 0..3 {
+            for i in 0..n {
+                ch[i] = buf[i * 3 + c];
+            }
+            let low = box_blur(&ch, w_us, h_us, r2);
+            for i in 0..n {
+                let m = mask[i] * strength;
+                if m < 0.01 {
+                    continue;
+                }
+                let d = ch[i] - low[i];
+                // |d|가 작으면(잡티) 거의 제거, 크면(윤곽) 유지
+                let f = (d.abs() / 0.10).clamp(0.0, 1.0);
+                let f = f * f * (3.0 - 2.0 * f);
+                let smoothed = low[i] + d * f;
+                buf[i * 3 + c] = clamp01(ch[i] + (smoothed - ch[i]) * m);
             }
         }
     }
@@ -934,9 +1283,17 @@ pub fn apply(rgb: &[u8], w: u32, h: u32, p: &Params, lut: Option<&Lut3d>) -> Vec
         }
     }
 
+    // f32 → u8 (+디더링): 8비트 양자화가 강한 톤커브로 증폭되며 생기는
+    // 피부·하늘의 층(밴딩)을 ±0.5 LSB 노이즈로 흩어서 없앤다 (눈에는 안 보임)
     let mut out = vec![0u8; n * 3];
-    for i in 0..n * 3 {
-        out[i] = (buf[i] * 255.0 + 0.5) as u8;
+    for y in 0..h_us {
+        for x in 0..w_us {
+            let i = (y * w_us + x) * 3;
+            let nz = hash_noise(x as u32, y as u32, 101) * 0.9;
+            for c in 0..3 {
+                out[i + c] = (buf[i + c] * 255.0 + 0.5 + nz).clamp(0.0, 255.0) as u8;
+            }
+        }
     }
     out
 }

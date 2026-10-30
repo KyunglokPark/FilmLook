@@ -1,6 +1,10 @@
 import "./styles.css";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open as openDialog, save as saveDialog, message } from "@tauri-apps/plugin-dialog";
+
+/// 폴더 일괄 처리 결과가 저장되는 하위 폴더 이름 (앱 이름 확정되면 여기만 바꾸면 됨)
+const BATCH_OUT_NAME = "iDFilm";
 
 // ---- 필름 시뮬레이션 목록 (process.rs의 recipe()와 id가 일치해야 함) ----
 const FILMS = [
@@ -26,6 +30,7 @@ interface Params {
   sharpen: number;
   grain: number;
   vignette: number;
+  skin: number;
 }
 
 const DEFAULTS: Params = {
@@ -37,6 +42,7 @@ const DEFAULTS: Params = {
   sharpen: 0,
   grain: 0,
   vignette: 0,
+  skin: 0,
 };
 
 // 슬라이더 정의: [키, 라벨, 최소, 최대, 스텝]
@@ -48,6 +54,7 @@ const SLIDERS: [keyof Params, string, number, number, number][] = [
   ["sharpen", "샤픈", 0, 1, 0.02],
   ["grain", "그레인", 0, 1, 0.02],
   ["vignette", "비네트", 0, 1, 0.02],
+  ["skin", "피부 보정", 0, 1, 0.02],
 ];
 
 let params: Params = { ...DEFAULTS };
@@ -71,6 +78,7 @@ const compareBtn = document.getElementById("act-compare") as HTMLButtonElement;
 const resetBtn = document.getElementById("act-reset") as HTMLButtonElement;
 const extractBtn = document.getElementById("act-extract") as HTMLButtonElement;
 const exportLutBtn = document.getElementById("act-export-lut") as HTMLButtonElement;
+const openFolderBtn = document.getElementById("act-open-folder") as HTMLButtonElement;
 const filmsEl = document.getElementById("films") as HTMLDivElement;
 const slidersEl = document.getElementById("sliders") as HTMLDivElement;
 
@@ -291,6 +299,11 @@ async function openImage() {
     filters: [{ name: "이미지", extensions: ["jpg", "jpeg", "png", "bmp", "webp"] }],
   });
   if (!picked || Array.isArray(picked)) return;
+  await loadImagePath(picked);
+}
+
+/// 경로의 이미지를 연다 (파일 대화상자·폴더 목록 더블클릭 공용)
+async function loadImagePath(picked: string) {
   busyEl.classList.remove("hidden");
   statusEl.textContent = "이미지 여는 중…";
   try {
@@ -312,6 +325,7 @@ async function openImage() {
     saveBtn.disabled = false;
     compareBtn.disabled = false;
     updateZoomInfo();
+    renderFileList(); // 폴더 목록이 열려 있으면 현재 파일 하이라이트 갱신
     statusEl.textContent = `${baseName(picked)} — 휠로 확대, / 로 1:1 보기`;
     scheduleRender(0);
   } catch (e) {
@@ -344,6 +358,114 @@ async function saveImage() {
     statusEl.textContent = String(e);
     await message(String(e), { title: "iDFilm", kind: "error" });
   } finally {
+    busyEl.classList.add("hidden");
+  }
+}
+
+// ---- 폴더 열기 + 이미지 목록 + 일괄 처리 ----
+const filelistEl = document.getElementById("filelist") as HTMLElement;
+const flTitleEl = document.getElementById("fl-title") as HTMLSpanElement;
+const flItemsEl = document.getElementById("fl-items") as HTMLDivElement;
+const flBatchBtn = document.getElementById("fl-batch") as HTMLButtonElement;
+const flCloseBtn = document.getElementById("fl-close") as HTMLButtonElement;
+
+let folderDir: string | null = null;
+let folderEntries: { name: string; path: string; checked: boolean }[] = [];
+let batchRunning = false;
+
+function updateBatchCount() {
+  const n = folderEntries.filter((e) => e.checked).length;
+  flBatchBtn.textContent = batchRunning ? "취소" : `일괄 처리 (${n})`;
+}
+
+function renderFileList() {
+  flItemsEl.innerHTML = "";
+  for (const entry of folderEntries) {
+    const row = document.createElement("div");
+    row.className = "fl-item" + (entry.path === filePath ? " open" : "");
+    row.title = entry.name;
+
+    // 체크박스 — 일괄 처리에 넣었다 뺐다
+    const check = document.createElement("input");
+    check.type = "checkbox";
+    check.checked = entry.checked;
+    check.addEventListener("click", (e) => e.stopPropagation());
+    check.addEventListener("change", () => {
+      entry.checked = check.checked;
+      updateBatchCount();
+    });
+    const label = document.createElement("span");
+    label.className = "fl-name";
+    label.textContent = entry.name;
+    row.append(check, label);
+
+    row.addEventListener("click", () => {
+      flItemsEl.querySelectorAll(".fl-item.selected").forEach((el) => el.classList.remove("selected"));
+      row.classList.add("selected");
+    });
+    row.addEventListener("dblclick", () => void loadImagePath(entry.path));
+    flItemsEl.appendChild(row);
+  }
+  updateBatchCount();
+}
+
+async function openFolder() {
+  const dir = await openDialog({ directory: true, multiple: false, title: "폴더 선택" });
+  if (!dir || Array.isArray(dir)) return;
+  try {
+    const entries = await invoke<{ name: string; path: string }[]>("list_images", { dir });
+    if (entries.length === 0) {
+      statusEl.textContent = "폴더에 이미지가 없습니다";
+      return;
+    }
+    folderDir = dir;
+    folderEntries = entries.map((e) => ({ ...e, checked: true }));
+    flTitleEl.textContent = baseName(dir);
+    flTitleEl.title = dir;
+    filelistEl.classList.remove("hidden");
+    renderFileList();
+    statusEl.textContent = `${baseName(dir)} — 이미지 ${entries.length}장 · 더블클릭으로 열기`;
+  } catch (e) {
+    statusEl.textContent = String(e);
+    await message(String(e), { title: "iDFilm", kind: "error" });
+  }
+}
+
+void listen<{ done: number; total: number; name: string }>("batch-progress", (e) => {
+  const { done, total, name } = e.payload;
+  statusEl.textContent =
+    done >= total ? "일괄 처리 마무리 중…" : `일괄 처리 ${done + 1}/${total} — ${name}`;
+});
+
+async function batchProcess() {
+  if (!folderDir) return;
+  if (batchRunning) {
+    void invoke("batch_cancel"); // 실행 중이면 취소 요청
+    statusEl.textContent = "취소 중…";
+    return;
+  }
+  const files = folderEntries.filter((e) => e.checked).map((e) => e.path);
+  if (files.length === 0) {
+    statusEl.textContent = "체크된 이미지가 없습니다";
+    return;
+  }
+  batchRunning = true;
+  updateBatchCount();
+  busyEl.classList.remove("hidden");
+  try {
+    const summary = await invoke<string>("batch_process", {
+      dir: folderDir,
+      files,
+      params,
+      outName: BATCH_OUT_NAME,
+    });
+    statusEl.textContent = `일괄 처리: ${summary}`;
+  } catch (e) {
+    statusEl.textContent = String(e);
+    await message(String(e), { title: "iDFilm", kind: "error" });
+  } finally {
+    batchRunning = false;
+    updateBatchCount();
     busyEl.classList.add("hidden");
   }
 }
@@ -540,6 +662,11 @@ resetBtn.addEventListener("click", resetAll);
 compareBtn.addEventListener("click", () => void setCompare(!comparing));
 extractBtn.addEventListener("click", () => void extractRecipe());
 exportLutBtn.addEventListener("click", () => void exportLut());
+openFolderBtn.addEventListener("click", () => void openFolder());
+flBatchBtn.addEventListener("click", () => void batchProcess());
+flCloseBtn.addEventListener("click", () => {
+  filelistEl.classList.add("hidden");
+});
 
 window.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;

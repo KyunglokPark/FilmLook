@@ -23,8 +23,14 @@ const PREVIEW_MAX: u32 = 1400;
 /// 내장 필름 LUT — 빌드에 임베드되어 항상 사용 가능 (형이 추출한 Fuji Style)
 fn builtin_fuji() -> Option<&'static Lut3d> {
     static FUJI: std::sync::OnceLock<Option<Lut3d>> = std::sync::OnceLock::new();
-    FUJI.get_or_init(|| process::parse_cube(include_str!("../luts/Fuji_Style.cube")).ok())
-        .as_ref()
+    FUJI.get_or_init(|| {
+        process::parse_cube(include_str!("../luts/Fuji_Style.cube"))
+            .ok()
+            // 옛 추출 방식으로 구운 큐브라 셀 노이즈가 있다 — 다항식 리핏으로
+            // 매끈한 LUT로 재생성 (밴딩·중립색 오염 제거)
+            .map(|l| process::refit_lut(&l))
+    })
+    .as_ref()
 }
 
 /// 필름 id에 맞는 LUT 선택 — 내장 필름이면 임베드 LUT, "lut"이면 사용자 로드 LUT
@@ -47,6 +53,8 @@ struct Loaded {
 struct ImgState {
     img: Mutex<Option<Loaded>>,
     lut: Mutex<Option<Lut3d>>,
+    /// 폴더 일괄 처리 취소 플래그
+    batch_cancel: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -120,7 +128,7 @@ fn open_image(state: State<ImgState>, path: String) -> Result<OpenResult, String
 #[tauri::command(async)]
 fn load_lut(state: State<ImgState>, path: String) -> Result<String, String> {
     let lower = path.to_lowercase();
-    let lut = if lower.ends_with(".cube") {
+    let mut lut = if lower.ends_with(".cube") {
         let text = std::fs::read_to_string(&path).map_err(err)?;
         process::parse_cube(&text)?
     } else {
@@ -129,6 +137,8 @@ fn load_lut(state: State<ImgState>, path: String) -> Result<String, String> {
         let (w, h) = rgb.dimensions();
         process::parse_hald(rgb.as_raw(), w, h)?
     };
+    // 가벼운 스무딩 — 셀 노이즈로 인한 밴딩 방지 (정밀 제작 LUT에는 체감 영향 없음)
+    process::smooth_lut(&mut lut, 1, 0.75);
     let info = format!("{}³", lut.size);
     *state.lut.lock().unwrap() = Some(lut);
     Ok(info)
@@ -238,9 +248,8 @@ fn extract_lut(state: State<ImgState>, before: String, after: String) -> Result<
         return Err("겹치는 영역이 너무 작습니다 — 같은 사진의 전/후를 선택하세요".into());
     }
 
-    let mut lut = process::fit_lut(&src, &dst, count, 21);
-    // 격자 평균으로 뭉개진 대비·채도를 목표 사진 통계에 맞춰 복원 (탁함 제거)
-    process::calibrate_lut(&mut lut, &src, &dst, count);
+    // 3차 다항식 피팅 — 매끈함이 구조적으로 보장돼 밴딩·중립색 오염이 없다
+    let lut = process::fit_smooth(&src, &dst, count)?;
     let info = format!("{}³ (전/후 추출, 정렬 {dx},{dy})", lut.size);
     *state.lut.lock().unwrap() = Some(lut);
     Ok(info)
@@ -306,6 +315,132 @@ fn save_image(state: State<ImgState>, path: String, params: Params) -> Result<()
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImgEntry {
+    name: String,
+    path: String,
+}
+
+/// 폴더 안의 이미지 파일 목록 (이름순)
+#[tauri::command(async)]
+fn list_images(dir: String) -> Result<Vec<ImgEntry>, String> {
+    const EXTS: [&str; 5] = ["jpg", "jpeg", "png", "bmp", "webp"];
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .map_err(|e| format!("폴더를 열 수 없습니다: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| EXTS.contains(&x.to_lowercase().as_str()))
+                    .unwrap_or(false)
+        })
+        .collect();
+    files.sort();
+    Ok(files
+        .into_iter()
+        .filter_map(|p| {
+            Some(ImgEntry {
+                name: p.file_name()?.to_str()?.to_string(),
+                path: p.to_str()?.to_string(),
+            })
+        })
+        .collect())
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BatchProgress {
+    done: usize,
+    total: usize,
+    name: String,
+}
+
+/// 선택된 이미지들에 현재 설정을 적용해 `dir/out_name/`에 저장한다.
+/// 진행 상황은 "batch-progress" 이벤트로 프런트에 알린다.
+#[tauri::command(async)]
+fn batch_process(
+    app: tauri::AppHandle,
+    state: State<ImgState>,
+    dir: String,
+    files: Vec<String>,
+    params: Params,
+    out_name: String,
+) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    use tauri::Emitter;
+
+    state.batch_cancel.store(false, Ordering::Relaxed);
+
+    // LUT 스냅샷 (긴 작업 동안 뮤텍스를 잡고 있지 않도록 복제)
+    let user_lut: Option<Lut3d> = state.lut.lock().unwrap().clone();
+    let lut_ref: Option<&Lut3d> = match params.film.as_str() {
+        "fuji_style" => builtin_fuji(),
+        "lut" => user_lut.as_ref(),
+        _ => None,
+    };
+
+    let files: Vec<std::path::PathBuf> = files.into_iter().map(std::path::PathBuf::from).collect();
+    let total = files.len();
+    if total == 0 {
+        return Err("선택된 이미지가 없습니다".into());
+    }
+
+    let out_dir = std::path::Path::new(&dir).join(out_name.trim());
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("출력 폴더 생성 실패: {e}"))?;
+
+    let mut ok = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (i, path) in files.iter().enumerate() {
+        if state.batch_cancel.load(Ordering::Relaxed) {
+            return Ok(format!("취소됨 — {ok}/{total}장 완료 (저장 위치: {})", out_dir.display()));
+        }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let _ = app.emit("batch-progress", BatchProgress { done: i, total, name: name.clone() });
+
+        let result = (|| -> Result<(), String> {
+            let p = path.to_str().ok_or("경로 오류")?;
+            let img = image::open(p).map_err(err)?;
+            let rgb = apply_orientation(img.to_rgb8(), exif_orientation(p));
+            let (w, h) = rgb.dimensions();
+            let out = process::apply(rgb.as_raw(), w, h, &params, lut_ref);
+            let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
+
+            let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("jpg").to_lowercase();
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("image");
+            if ext == "png" {
+                let out_path = out_dir.join(format!("{stem}.png"));
+                img.save_with_format(&out_path, ImageFormat::Png).map_err(err)
+            } else {
+                // jpg/jpeg 유지, bmp/webp는 jpg로 저장
+                let out_path = out_dir.join(format!("{stem}.jpg"));
+                let file = std::fs::File::create(&out_path).map_err(err)?;
+                let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
+                img.write_with_encoder(enc).map_err(err)
+            }
+        })();
+        match result {
+            Ok(()) => ok += 1,
+            Err(_) => failed.push(name),
+        }
+    }
+    let _ = app.emit("batch-progress", BatchProgress { done: total, total, name: String::new() });
+
+    let mut msg = format!("{ok}/{total}장 완료 (저장 위치: {})", out_dir.display());
+    if !failed.is_empty() {
+        msg += &format!(" · 실패 {}장: {}", failed.len(), failed.join(", "));
+    }
+    Ok(msg)
+}
+
+/// 진행 중인 일괄 처리 취소 요청
+#[tauri::command]
+fn batch_cancel(state: State<ImgState>) {
+    state.batch_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -319,7 +454,10 @@ pub fn run() {
             render_preview,
             render_full,
             original_full,
-            save_image
+            save_image,
+            list_images,
+            batch_process,
+            batch_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
