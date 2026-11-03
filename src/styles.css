@@ -175,6 +175,8 @@ body {
   background: #0d0d0e;
   min-width: 0;
   overflow: hidden;
+  /* 터치에서 브라우저 스크롤 제스처가 디바이더 드래그·패닝을 가로채지 않게 */
+  touch-action: none;
 }
 
 #placeholder {
@@ -465,4 +467,123 @@ body {
   font-size: 12px;
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* ---- 모바일(좁은 화면 또는 터치 기기): 사진 위 + 조정 패널 아래 세로 배치.
+   가로 모드에서도 유지 — 사진을 크게 보려는 용도라 사이드바로 안 돌아간다 ---- */
+#panel-handle {
+  display: none;
+}
+
+@media (max-width: 700px), (pointer: coarse) {
+  #topbar {
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  #topbar button {
+    padding: 11px 16px;
+    font-size: 15px;
+    border-radius: 8px;
+  }
+
+  .app-name {
+    font-size: 17px;
+    margin-right: 4px;
+  }
+
+  #file-info {
+    display: none;
+  }
+
+  #main {
+    flex-direction: column;
+  }
+
+  #filelist {
+    width: 100%;
+    max-height: 30vh;
+    border-right: none;
+    border-bottom: 1px solid #000;
+  }
+
+  .fl-head button {
+    padding: 8px 12px;
+    font-size: 13px;
+  }
+
+  .fl-item {
+    padding: 10px 12px;
+    font-size: 14px;
+  }
+
+  .fl-item input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+  }
+
+  #panel {
+    width: 100%;
+    max-height: 42vh;
+    border-left: none;
+    border-top: 1px solid #000;
+    padding: 4px 14px 16px;
+    transition: max-height 0.2s ease;
+  }
+
+  /* 패널 상단 그립 — 탭하면 패널 접힘/펼침 */
+  #panel-handle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    padding: 7px 0;
+    cursor: pointer;
+  }
+
+  #panel-handle::before {
+    content: "";
+    width: 44px;
+    height: 5px;
+    border-radius: 3px;
+    background: #4a4a4f;
+  }
+
+  #panel.collapsed {
+    max-height: 33px;
+    overflow: hidden;
+    padding-bottom: 4px;
+  }
+
+  .film {
+    padding: 13px 8px;
+  }
+
+  .film .fname {
+    font-size: 15px;
+  }
+
+  .film .fdesc {
+    font-size: 12px;
+  }
+
+  .lut-tools button,
+  #act-reset {
+    padding: 12px;
+    font-size: 14px;
+  }
+
+  .slider-head {
+    font-size: 14px;
+  }
+
+  .slider-row input[type="range"] {
+    height: 30px;
+  }
+
+  #compare-divider .handle {
+    width: 46px;
+    height: 46px;
+  }
 }

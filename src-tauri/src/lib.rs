@@ -71,9 +71,8 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 /// JPEG EXIF Orientation을 읽어 회전을 돌려준다 (3=180, 6=90CW, 8=270CW).
-fn exif_orientation(path: &str) -> u32 {
-    let Ok(file) = std::fs::File::open(path) else { return 1 };
-    let mut reader = std::io::BufReader::new(file);
+fn exif_orientation(bytes: &[u8]) -> u32 {
+    let mut reader = Cursor::new(bytes);
     let Ok(exif) = exif::Reader::new().read_from_container(&mut reader) else { return 1 };
     exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
@@ -112,11 +111,32 @@ fn make_preview(full: &RgbImage) -> RgbImage {
     image::imageops::resize(full, nw.max(1), nh.max(1), FilterType::Triangle)
 }
 
-#[tauri::command(async)]
-fn open_image(state: State<ImgState>, path: String) -> Result<OpenResult, String> {
-    let img = image::open(&path).map_err(|e| format!("이미지를 열 수 없습니다: {e}"))?;
-    let rgb = img.to_rgb8();
-    let rgb = apply_orientation(rgb, exif_orientation(&path));
+/// 경로 문자열 → 파일 바이트. 안드로이드 content:// URI는 fs 플러그인이
+/// 네이티브(ContentResolver)로 읽는다. 일반 경로는 그대로 파일시스템.
+fn read_any<R: tauri::Runtime>(app: &tauri::AppHandle<R>, path: &str) -> Result<Vec<u8>, String> {
+    use std::str::FromStr as _;
+    use tauri_plugin_fs::FsExt as _;
+    let fp = tauri_plugin_fs::FilePath::from_str(path).map_err(err)?;
+    app.fs().read(fp).map_err(|e| format!("파일을 읽을 수 없습니다: {e}"))
+}
+
+/// 쓰기용 파일 열기 — content:// URI(안드로이드 저장 대화상자)도 지원
+fn create_any<R: tauri::Runtime>(app: &tauri::AppHandle<R>, path: &str) -> Result<std::fs::File, String> {
+    use std::str::FromStr as _;
+    use tauri_plugin_fs::FsExt as _;
+    let fp = tauri_plugin_fs::FilePath::from_str(path).map_err(err)?;
+    let mut opts = tauri_plugin_fs::OpenOptions::new();
+    opts.read(false).write(true).create(true).truncate(true);
+    app.fs().open(fp, opts).map_err(|e| format!("파일을 만들 수 없습니다: {e}"))
+}
+
+/// 바이트 → RGB 디코드 (EXIF 회전 반영)
+fn decode_image_bytes(bytes: &[u8]) -> Result<RgbImage, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("이미지를 열 수 없습니다: {e}"))?;
+    Ok(apply_orientation(img.to_rgb8(), exif_orientation(bytes)))
+}
+
+fn finish_open(state: &ImgState, rgb: RgbImage) -> Result<OpenResult, String> {
     let preview = make_preview(&rgb);
     let (width, height) = rgb.dimensions();
     let preview_url = to_data_url(&preview, 90)?;
@@ -124,15 +144,24 @@ fn open_image(state: State<ImgState>, path: String) -> Result<OpenResult, String
     Ok(OpenResult { width, height, preview: preview_url })
 }
 
+#[tauri::command(async)]
+fn open_image(app: tauri::AppHandle, state: State<ImgState>, path: String) -> Result<OpenResult, String> {
+    let bytes = read_any(&app, &path)?;
+    finish_open(&state, decode_image_bytes(&bytes)?)
+}
+
 /// 3D LUT 로드 (.cube 또는 HaldCLUT PNG). 성공하면 LUT 정보 문자열 반환.
 #[tauri::command(async)]
-fn load_lut(state: State<ImgState>, path: String) -> Result<String, String> {
-    let lower = path.to_lowercase();
-    let mut lut = if lower.ends_with(".cube") {
-        let text = std::fs::read_to_string(&path).map_err(err)?;
-        process::parse_cube(&text)?
+fn load_lut(app: tauri::AppHandle, state: State<ImgState>, path: String) -> Result<String, String> {
+    let bytes = read_any(&app, &path)?;
+    // content:// URI는 확장자가 없을 수 있으므로 내용으로도 판별
+    let as_text = std::str::from_utf8(&bytes).ok();
+    let is_cube = path.to_lowercase().ends_with(".cube")
+        || as_text.is_some_and(|t| t.contains("LUT_3D_SIZE"));
+    let mut lut = if is_cube {
+        process::parse_cube(as_text.ok_or("잘못된 .cube 파일입니다")?)?
     } else {
-        let img = image::open(&path).map_err(|e| format!("LUT 이미지를 열 수 없습니다: {e}"))?;
+        let img = image::load_from_memory(&bytes).map_err(|e| format!("LUT 이미지를 열 수 없습니다: {e}"))?;
         let rgb = img.to_rgb8();
         let (w, h) = rgb.dimensions();
         process::parse_hald(rgb.as_raw(), w, h)?
@@ -194,11 +223,8 @@ fn align_offset(bg: &[f32], ag: &[f32], w: usize, h: usize, range: i32) -> (i32,
 /// 크롭이 조금 달라도 되도록 ① 공통 비율 중앙 크롭 ② 밝기 기반 자동 정렬을
 /// 거친 뒤, 겹치는 영역의 픽셀 쌍만으로 LUT를 피팅한다.
 #[tauri::command(async)]
-fn extract_lut(state: State<ImgState>, before: String, after: String) -> Result<String, String> {
-    let load = |p: &str| -> Result<RgbImage, String> {
-        let img = image::open(p).map_err(|e| format!("이미지를 열 수 없습니다: {e}"))?;
-        Ok(apply_orientation(img.to_rgb8(), exif_orientation(p)))
-    };
+fn extract_lut(app: tauri::AppHandle, state: State<ImgState>, before: String, after: String) -> Result<String, String> {
+    let load = |p: &str| -> Result<RgbImage, String> { decode_image_bytes(&read_any(&app, p)?) };
     let b = load(&before)?;
     let a = load(&after)?;
 
@@ -297,7 +323,7 @@ fn original_full(state: State<ImgState>) -> Result<String, String> {
 
 /// 원본 해상도에 적용해서 저장. 확장자(jpg/png)에 따라 포맷 결정.
 #[tauri::command(async)]
-fn save_image(state: State<ImgState>, path: String, params: Params) -> Result<(), String> {
+fn save_image(app: tauri::AppHandle, state: State<ImgState>, path: String, params: Params) -> Result<(), String> {
     let guard = state.img.lock().unwrap();
     let loaded = guard.as_ref().ok_or("열린 이미지가 없습니다")?;
     let lut_guard = state.lut.lock().unwrap();
@@ -305,12 +331,12 @@ fn save_image(state: State<ImgState>, path: String, params: Params) -> Result<()
     let out = process::apply(loaded.full.as_raw(), w, h, &params, select_lut(&params.film, &lut_guard));
     let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
 
-    let lower = path.to_lowercase();
-    if lower.ends_with(".png") {
-        img.save_with_format(&path, ImageFormat::Png).map_err(err)
+    let file = create_any(&app, &path)?;
+    let mut w = std::io::BufWriter::new(file);
+    if path.to_lowercase().ends_with(".png") {
+        img.write_to(&mut std::io::BufWriter::new(&mut w), ImageFormat::Png).map_err(err)
     } else {
-        let file = std::fs::File::create(&path).map_err(err)?;
-        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::BufWriter::new(file), 92);
+        let enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut w, 92);
         img.write_with_encoder(enc).map_err(err)
     }
 }
@@ -402,8 +428,8 @@ fn batch_process(
 
         let result = (|| -> Result<(), String> {
             let p = path.to_str().ok_or("경로 오류")?;
-            let img = image::open(p).map_err(err)?;
-            let rgb = apply_orientation(img.to_rgb8(), exif_orientation(p));
+            let bytes = std::fs::read(p).map_err(err)?;
+            let rgb = decode_image_bytes(&bytes)?;
             let (w, h) = rgb.dimensions();
             let out = process::apply(rgb.as_raw(), w, h, &params, lut_ref);
             let img = RgbImage::from_raw(w, h, out).ok_or("버퍼 오류")?;
@@ -445,6 +471,7 @@ fn batch_cancel(state: State<ImgState>) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(ImgState::default())
         .invoke_handler(tauri::generate_handler![
             open_image,

@@ -588,6 +588,24 @@ async function toggle11() {
   }
 }
 
+/// 화면의 (clientX, clientY) 지점이 고정되도록 줌 적용 (휠·핀치 공용)
+function zoomAt(clientX: number, clientY: number, nzRaw: number) {
+  const r = compareWrapEl.parentElement!.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  const maxZoom = Math.max(8, (1 / fitScale()) * 3);
+  const nz = Math.min(maxZoom, Math.max(1, nzRaw));
+  tx = clientX - cx - ((clientX - cx - tx) * nz) / zoom;
+  ty = clientY - cy - ((clientY - cy - ty) * nz) / zoom;
+  zoom = nz;
+  if (zoom <= 1.001) {
+    tx = 0;
+    ty = 0;
+  }
+  clampPan();
+  applyTransform();
+}
+
 // 휠 줌 (커서 위치 기준)
 const viewerEl = document.getElementById("viewer") as HTMLDivElement;
 viewerEl.addEventListener(
@@ -595,22 +613,7 @@ viewerEl.addEventListener(
   (e) => {
     if (!filePath) return;
     e.preventDefault();
-    const r = compareWrapEl.parentElement!.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    const factor = Math.pow(1.0015, -e.deltaY);
-    const maxZoom = Math.max(8, (1 / fitScale()) * 3);
-    const nz = Math.min(maxZoom, Math.max(1, zoom * factor));
-    // 커서 아래 지점이 고정되도록 이동량 보정
-    tx = e.clientX - cx - ((e.clientX - cx - tx) * nz) / zoom;
-    ty = e.clientY - cy - ((e.clientY - cy - ty) * nz) / zoom;
-    zoom = nz;
-    if (zoom <= 1.001) {
-      tx = 0;
-      ty = 0;
-    }
-    clampPan();
-    applyTransform();
+    zoomAt(e.clientX, e.clientY, zoom * Math.pow(1.0015, -e.deltaY));
   },
   { passive: false },
 );
@@ -660,18 +663,42 @@ compareDividerEl.addEventListener("pointermove", (e) => {
 compareDividerEl.addEventListener("pointerup", () => {
   draggingDivider = false;
 });
-// 확대 상태에선 드래그로 패닝, 클릭(이동 없음)이면 비교 디바이더 이동
+compareDividerEl.addEventListener("pointercancel", () => {
+  draggingDivider = false;
+});
+// 두 손가락 핀치 줌 (터치)
+const touches = new Map<number, { x: number; y: number }>();
+let pinch: { dist: number; zoom: number } | null = null;
+const touchDist = () => {
+  const pts = [...touches.values()];
+  return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+};
+
+// 확대 상태에선 드래그로 패닝, 클릭(이동 없음)이면 비교 디바이더 이동, 두 손가락은 핀치 줌
 compareWrapEl.addEventListener("pointerdown", (e) => {
   if (e.target === compareDividerEl || compareDividerEl.contains(e.target as Node)) return;
+  touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  compareWrapEl.setPointerCapture(e.pointerId);
+  if (touches.size === 2) {
+    pinch = { dist: touchDist(), zoom };
+    panning = false;
+    panMoved = true; // 핀치는 탭(디바이더 이동)이 아님
+    return;
+  }
   panning = zoom > 1.001;
   panMoved = false;
   panStart = { x: e.clientX, y: e.clientY, tx, ty };
-  if (panning) {
-    compareWrapEl.setPointerCapture(e.pointerId);
-    compareWrapEl.style.cursor = "grabbing";
-  }
+  if (panning) compareWrapEl.style.cursor = "grabbing";
 });
 compareWrapEl.addEventListener("pointermove", (e) => {
+  if (touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (pinch && touches.size >= 2) {
+    const pts = [...touches.values()];
+    const midX = (pts[0].x + pts[1].x) / 2;
+    const midY = (pts[0].y + pts[1].y) / 2;
+    zoomAt(midX, midY, (pinch.zoom * touchDist()) / pinch.dist);
+    return;
+  }
   if (!panning) return;
   const dx = e.clientX - panStart.x;
   const dy = e.clientY - panStart.y;
@@ -681,11 +708,31 @@ compareWrapEl.addEventListener("pointermove", (e) => {
   clampPan();
   applyTransform();
 });
+/// 손가락 하나가 떨어졌을 때 — 핀치 종료 시 남은 손가락은 팬으로 전환
+function endTouch(e: PointerEvent) {
+  touches.delete(e.pointerId);
+  if (pinch && touches.size < 2) {
+    pinch = null;
+    const rest = touches.values().next().value;
+    if (rest) {
+      panning = zoom > 1.001;
+      panStart = { x: rest.x, y: rest.y, tx, ty };
+    }
+    return true; // 핀치에서 빠져나옴
+  }
+  return false;
+}
 compareWrapEl.addEventListener("pointerup", (e) => {
-  const wasPan = panning && panMoved;
+  if (endTouch(e)) return;
+  const wasTap = !panMoved;
   panning = false;
   compareWrapEl.style.cursor = zoom > 1.001 ? "grab" : "";
-  if (!wasPan && comparing && e.target !== compareDividerEl) moveDivider(e.clientX);
+  if (wasTap && comparing && e.target !== compareDividerEl) moveDivider(e.clientX);
+});
+compareWrapEl.addEventListener("pointercancel", (e) => {
+  endTouch(e);
+  panning = false;
+  compareWrapEl.style.cursor = zoom > 1.001 ? "grab" : "";
 });
 // 더블클릭 = 1:1 토글
 compareWrapEl.addEventListener("dblclick", () => void toggle11());
@@ -701,6 +748,16 @@ flBatchBtn.addEventListener("click", () => void batchProcess());
 flCloseBtn.addEventListener("click", () => {
   filelistEl.classList.add("hidden");
 });
+// 모바일: 패널 그립 탭으로 조정 패널 접기/펼치기
+const panelEl = document.getElementById("panel")!;
+document.getElementById("panel-handle")!.addEventListener("click", () => {
+  panelEl.classList.toggle("collapsed");
+});
+// 가로 모드는 사진 크게 보기 용도 — 회전하면 패널을 자동으로 접는다 (그립 탭으로 다시 펼침)
+const landscapeMq = window.matchMedia("(orientation: landscape) and (pointer: coarse)");
+const syncPanelToOrientation = () => panelEl.classList.toggle("collapsed", landscapeMq.matches);
+landscapeMq.addEventListener("change", syncPanelToOrientation);
+syncPanelToOrientation();
 
 window.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
